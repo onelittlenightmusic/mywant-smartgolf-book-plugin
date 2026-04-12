@@ -32,6 +32,36 @@ wantType:
       required: true
 
   state:
+    - name: skill_timeout_seconds
+      description: Max seconds to wait for the skill script to complete (default 120)
+      type: int
+      label: goal
+      persistent: false
+      initialValue: 120
+
+    - name: skill_path
+      description: Path to the MRS skill script (set by onInitialize)
+      type: string
+      label: current
+      persistent: false
+      initialValue: ""
+
+    - name: skill_json_arg
+      description: |
+        Single JSON string argument built from params via ${field} interpolation.
+        Passed as sys.argv[1] to the skill script.
+      type: string
+      label: current
+      persistent: false
+      initialValue: ""
+
+    - name: mrs_raw_output
+      description: Raw JSON output from the MRS skill (source for fetchFrom fields)
+      type: object
+      label: current
+      persistent: false
+      initialValue: null
+
     - name: room
       description: Room name (copied from param)
       type: string
@@ -80,6 +110,7 @@ wantType:
       label: current
       persistent: true
       initialValue: ""
+      fetchFrom: mrs_raw_output
       onFetchData: "confirmation.reservation_datetime"
 
     - name: service
@@ -88,6 +119,7 @@ wantType:
       label: current
       persistent: true
       initialValue: ""
+      fetchFrom: mrs_raw_output
       onFetchData: "confirmation.service"
 
     - name: payment
@@ -96,6 +128,7 @@ wantType:
       label: current
       persistent: true
       initialValue: ""
+      fetchFrom: mrs_raw_output
       onFetchData: "confirmation.payment"
 
   onInitialize:
@@ -105,49 +138,11 @@ wantType:
       time: time
     current:
       status: "pending"
+      skill_path: "~/.mywant/custom-types/mywant-smartgolf-book-plugin/main.py"
+      skill_json_arg: '{"room":"${room}","date":"${date}","time":{"time":"${time}"}}'
 
-  inlineAgents:
-    - name: run_book
-      type: do
-      runtime: shell
-      script: |
-        #!/bin/sh
-        ROOM=$(jq -r '.room // ""' "$MYWANT_CURRENT_FILE")
-        DATE=$(jq -r '.date // ""' "$MYWANT_CURRENT_FILE")
-        TIME=$(jq -r '.time // ""' "$MYWANT_CURRENT_FILE")
-
-        # Plugin is typically in ~/.mywant/custom-types/mywant-smartgolf-book-plugin
-        PLUGIN_DIR="$HOME/.mywant/custom-types/mywant-smartgolf-book-plugin"
-        # Fallback to skills directory
-        SKILLS_DIR="$HOME/.mywant/skills/book-available-time"
-
-        if [ -f "$PLUGIN_DIR/main.py" ]; then
-          MAIN="$PLUGIN_DIR/main.py"
-        elif [ -f "$SKILLS_DIR/main.py" ]; then
-          MAIN="$SKILLS_DIR/main.py"
-        else
-          # Final fallback (for local development within repo)
-          MAIN="./main.py"
-        fi
-
-        if [ ! -f "$MAIN" ]; then
-          printf '{"current_updates": {"error": "smartgolf book script not found at %s", "status": "failed"}}' "$MAIN"
-          exit 1
-        fi
-
-        INPUT=$(printf '{"room": "%s", "date": "%s", "time": {"time": "%s"}}' "$ROOM" "$DATE" "$TIME")
-        OUTPUT=$(python3 "$MAIN" "$INPUT" 2>/dev/null)
-        EXIT_CODE=$?
-
-        if [ $EXIT_CODE -eq 0 ]; then
-          SUMMARY="Ready to confirm: ${ROOM} ${DATE} ${TIME}"
-          ESCAPED_SUMMARY=$(printf '%s' "$SUMMARY" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))")
-          printf '{"json_data": %s, "current_updates": {"status": "done", "summary": %s}}' "$OUTPUT" "$ESCAPED_SUMMARY"
-        else
-          ERROR_MSG=$(printf '%s' "$OUTPUT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('error','unknown error'))" 2>/dev/null || echo "book script failed")
-          ESCAPED=$(printf '%s' "$ERROR_MSG" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))")
-          printf '{"current_updates": {"error": %s, "status": "failed"}}' "$ESCAPED"
-        fi
+  requires:
+    - do_mrs_agent
 
   examples:
     - name: Book SmartGolf Room
