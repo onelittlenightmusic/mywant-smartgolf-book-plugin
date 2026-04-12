@@ -1,0 +1,151 @@
+wantType:
+  metadata:
+    name: smartgolf_book
+    title: SmartGolf Booking Ready
+    description: |
+      Navigates the SmartGolf booking flow for a specified room/date/time
+      and stops at the confirmation screen (does NOT confirm the reservation).
+      Completes after reaching the confirmation page.
+    version: '1.0'
+    category: smartgolf
+    pattern: independent
+
+  finalResultField: summary
+
+  achievedWhen:
+    field: status
+    operator: "!="
+    value: "pending"
+
+  parameters:
+    - name: room
+      description: "Room name (e.g. 中野新橋店/打席予約(Room02))"
+      type: string
+      required: true
+    - name: date
+      description: "Date in YYYY-MM-DD format (JST)"
+      type: string
+      required: true
+    - name: time
+      description: "Time in HH:MM format (JST)"
+      type: string
+      required: true
+
+  state:
+    - name: room
+      description: Room name (copied from param)
+      type: string
+      label: current
+      persistent: false
+      initialValue: ""
+
+    - name: date
+      description: Booking date (copied from param)
+      type: string
+      label: current
+      persistent: false
+      initialValue: ""
+
+    - name: time
+      description: Booking time (copied from param)
+      type: string
+      label: current
+      persistent: false
+      initialValue: ""
+
+    - name: status
+      description: Execution status (pending, done, failed)
+      type: string
+      label: current
+      persistent: true
+      initialValue: "pending"
+
+    - name: error
+      description: Error message if execution failed
+      type: string
+      label: current
+      persistent: true
+      initialValue: ""
+
+    - name: summary
+      description: Summary of booking confirmation
+      type: string
+      label: current
+      persistent: true
+      initialValue: ""
+
+    - name: reservation_datetime
+      description: Reservation date/time as shown on confirmation
+      type: string
+      label: current
+      persistent: true
+      initialValue: ""
+      onFetchData: "confirmation.reservation_datetime"
+
+    - name: service
+      description: Service name as shown on confirmation
+      type: string
+      label: current
+      persistent: true
+      initialValue: ""
+      onFetchData: "confirmation.service"
+
+    - name: payment
+      description: Payment method as shown on confirmation
+      type: string
+      label: current
+      persistent: true
+      initialValue: ""
+      onFetchData: "confirmation.payment"
+
+  onInitialize:
+    params:
+      room: room
+      date: date
+      time: time
+    current:
+      status: "pending"
+
+  inlineAgents:
+    - name: run_book
+      type: do
+      runtime: shell
+      script: |
+        #!/bin/sh
+        ROOM=$(jq -r '.room // ""' "$MYWANT_CURRENT_FILE")
+        DATE=$(jq -r '.date // ""' "$MYWANT_CURRENT_FILE")
+        TIME=$(jq -r '.time // ""' "$MYWANT_CURRENT_FILE")
+
+        SCRIPT_DIR="$(dirname "$0")"
+        if [ -f "$SCRIPT_DIR/main.py" ]; then
+          MAIN="$SCRIPT_DIR/main.py"
+        else
+          MAIN="$(dirname "$(dirname "$SCRIPT_DIR")")/skills/book-available-time/main.py"
+        fi
+
+        INPUT=$(printf '{"room": "%s", "date": "%s", "time": {"time": "%s"}}' "$ROOM" "$DATE" "$TIME")
+        OUTPUT=$(python3 "$MAIN" "$INPUT" 2>/dev/null)
+        EXIT_CODE=$?
+
+        if [ $EXIT_CODE -eq 0 ]; then
+          SUMMARY="Ready to confirm: ${ROOM} ${DATE} ${TIME}"
+          ESCAPED_SUMMARY=$(printf '%s' "$SUMMARY" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))")
+          printf '{"json_data": %s, "current_updates": {"status": "done", "summary": %s}}' "$OUTPUT" "$ESCAPED_SUMMARY"
+        else
+          ERROR_MSG=$(printf '%s' "$OUTPUT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('error','unknown error'))" 2>/dev/null || echo "book script failed")
+          ESCAPED=$(printf '%s' "$ERROR_MSG" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))")
+          printf '{"current_updates": {"error": %s, "status": "failed"}}' "$ESCAPED"
+        fi
+
+  examples:
+    - name: Book SmartGolf Room
+      description: Navigate to booking confirmation for a specific room/time
+      want:
+        metadata:
+          name: book_room02
+          type: smartgolf_book
+        spec:
+          params:
+            room: "中野新橋店/打席予約(Room02)"
+            date: "2026-04-13"
+            time: "20:00"
