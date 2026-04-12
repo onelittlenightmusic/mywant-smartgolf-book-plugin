@@ -128,7 +128,6 @@ wantType:
 
   onInitialize:
     current:
-      status: "pending"
       skill_path: "~/.mywant/custom-types/mywant-smartgolf-book-plugin/main.py"
       skill_json_arg: '{"room":"${room}","date":"${date}","time":{"time":"${time}"}}'
 
