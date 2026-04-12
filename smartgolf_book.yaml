@@ -116,11 +116,23 @@ wantType:
         DATE=$(jq -r '.date // ""' "$MYWANT_CURRENT_FILE")
         TIME=$(jq -r '.time // ""' "$MYWANT_CURRENT_FILE")
 
-        SCRIPT_DIR="$(dirname "$0")"
-        if [ -f "$SCRIPT_DIR/main.py" ]; then
-          MAIN="$SCRIPT_DIR/main.py"
+        # Plugin is typically in ~/.mywant/custom-types/mywant-smartgolf-book-plugin
+        PLUGIN_DIR="$HOME/.mywant/custom-types/mywant-smartgolf-book-plugin"
+        # Fallback to skills directory
+        SKILLS_DIR="$HOME/.mywant/skills/book-available-time"
+
+        if [ -f "$PLUGIN_DIR/main.py" ]; then
+          MAIN="$PLUGIN_DIR/main.py"
+        elif [ -f "$SKILLS_DIR/main.py" ]; then
+          MAIN="$SKILLS_DIR/main.py"
         else
-          MAIN="$(dirname "$(dirname "$SCRIPT_DIR")")/skills/book-available-time/main.py"
+          # Final fallback (for local development within repo)
+          MAIN="./main.py"
+        fi
+
+        if [ ! -f "$MAIN" ]; then
+          printf '{"current_updates": {"error": "smartgolf book script not found at %s", "status": "failed"}}' "$MAIN"
+          exit 1
         fi
 
         INPUT=$(printf '{"room": "%s", "date": "%s", "time": {"time": "%s"}}' "$ROOM" "$DATE" "$TIME")
