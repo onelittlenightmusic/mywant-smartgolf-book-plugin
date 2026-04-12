@@ -132,10 +132,6 @@ wantType:
       onFetchData: "confirmation.payment"
 
   onInitialize:
-    params:
-      room: room
-      date: date
-      time: time
     current:
       status: "pending"
       skill_path: "~/.mywant/custom-types/mywant-smartgolf-book-plugin/main.py"
