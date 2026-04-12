@@ -12,11 +12,6 @@ wantType:
 
   finalResultField: summary
 
-  achievedWhen:
-    field: status
-    operator: "!="
-    value: "pending"
-
   parameters:
     - name: room
       description: "Room name (e.g. 中野新橋店/打席予約(Room02))"
