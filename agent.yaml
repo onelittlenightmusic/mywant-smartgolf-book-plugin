@@ -1,0 +1,34 @@
+agent:
+  metadata:
+    name: smartgolf_book_agent
+    capability: smartgolf_book
+    type: do
+  script:
+    path: ./main.py
+    timeout_seconds: 120
+  state_updates:
+    - name: status
+      type: string
+      label: current
+      persistent: true
+      onFetchData: "status"
+    - name: summary
+      type: string
+      label: current
+      persistent: true
+      onFetchData: "summary"
+    - name: reservation_datetime
+      type: string
+      label: current
+      persistent: true
+      onFetchData: "confirmation.reservation_datetime"
+    - name: service
+      type: string
+      label: current
+      persistent: true
+      onFetchData: "confirmation.service"
+    - name: payment
+      type: string
+      label: current
+      persistent: true
+      onFetchData: "confirmation.payment"

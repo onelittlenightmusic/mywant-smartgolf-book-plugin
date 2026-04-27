@@ -57,8 +57,7 @@ def main():
 
     room_name = booking.get("room", "")
     date_str = booking.get("date", "")
-    time_info = booking.get("time", {})
-    time_str = time_info.get("time", "") if isinstance(time_info, dict) else str(time_info)
+    time_str = str(booking.get("time", ""))
 
     if not room_name or not date_str or not time_str:
         error_out("Missing required fields: room, date, time.time")
@@ -145,14 +144,16 @@ def main():
                 if "Payment method" in line and i + 1 < len(lines):
                     confirmation["payment"] = lines[i + 1]
 
-            page.close()
+            # page.close() は呼ばない — 確認画面をブラウザに残す
 
+            reservation_dt = confirmation.get("reservation_datetime", f"{date_str} {time_str}")
             result = {
                 "status": "ready_to_confirm",
                 "room": room_name,
                 "date": date_str,
                 "time": time_str,
                 "confirmation": confirmation,
+                "summary": f"{room_name} {reservation_dt} - ready to confirm",
             }
             report_progress(100, "Done")
             print(json.dumps(result, ensure_ascii=False), flush=True)
