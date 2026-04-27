@@ -19,8 +19,12 @@ LOCATION_URLS = {
 }
 
 
+def report_progress(percentage, message=""):
+    print(json.dumps({"_progress": percentage, "_message": message}, ensure_ascii=False), flush=True)
+
+
 def error_out(message):
-    print(json.dumps({"error": message}, ensure_ascii=False))
+    print(json.dumps({"error": message}, ensure_ascii=False), flush=True)
     sys.exit(1)
 
 
@@ -67,15 +71,18 @@ def main():
 
     try:
         with sync_playwright() as p:
+            report_progress(5, "Connecting to browser")
             browser = p.chromium.connect_over_cdp("http://localhost:9222")
             context = browser.contexts[0]
             page = context.new_page()
 
             # 予約ページへ遷移
+            report_progress(15, f"Navigating to booking page: {room_name}")
             page.goto(url, wait_until="domcontentloaded")
             time.sleep(3)
 
             # 部屋を選択
+            report_progress(30, "Selecting room")
             select_btn = page.query_selector('[class*="CourseSelectModal"]')
             if not select_btn:
                 error_out("Service select button not found")
@@ -106,6 +113,7 @@ def main():
             time.sleep(2)
 
             # 時間スロットを React onChange で選択
+            report_progress(55, f"Selecting time slot: {date_str} {time_str}")
             target_inp = page.query_selector(f'input[value="{utc_val}"]')
             if not target_inp:
                 error_out(f"Time slot not found: {date_str} {time_str} (UTC: {utc_val})")
@@ -125,6 +133,7 @@ def main():
             time.sleep(2)
 
             # 確認画面のテキストを取得（予約ボタンは押さない）
+            report_progress(80, "Reading confirmation screen")
             confirmation = {}
             lines = [l.strip() for l in page.inner_text('body').split('\n') if l.strip()]
 
@@ -145,7 +154,8 @@ def main():
                 "time": time_str,
                 "confirmation": confirmation,
             }
-            print(json.dumps(result, ensure_ascii=False))
+            report_progress(100, "Done")
+            print(json.dumps(result, ensure_ascii=False), flush=True)
 
     except SystemExit:
         raise
