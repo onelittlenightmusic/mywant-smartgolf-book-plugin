@@ -9,6 +9,10 @@ wantType:
     version: '1.0'
     category: smartgolf
     pattern: independent
+    labels:
+      category-icon: Flag
+      category-bg-light: "linear-gradient(160deg, #bbf7d0 0%, #dcfce7 100%)"
+      category-bg-dark: "linear-gradient(160deg, #166534 0%, #052e16 100%)"
 
   finalResultField: summary
 
@@ -16,14 +20,17 @@ wantType:
     - name: room
       description: "Room name (e.g. 中野新橋店/打席予約(Room02))"
       type: string
+      subType: smartgolf_room
       required: true
     - name: date
       description: "Date in YYYY-MM-DD format (JST)"
       type: string
+      subType: date
       required: true
     - name: time
       description: "Time in HH:MM format (JST)"
       type: string
+      subType: time
       required: true
 
   state:
@@ -41,10 +48,30 @@ wantType:
       persistent: false
       initialValue: ""
 
+    - name: skill_required_params
+      description: |
+        Space-separated names of required params (e.g. "room date time").
+        The MRS agent skips execution until all listed params are non-empty in spec.params.
+        Set via onInitialize to enable the "wait for params" pattern.
+      type: string
+      label: current
+      persistent: false
+      initialValue: ""
+
+    - name: skill_json_arg_template
+      description: |
+        Template for skill_json_arg with ${param} placeholders.
+        Rebuilt from spec.params on each tick where required params are all present.
+        Allows param updates (e.g. from choice selection) to be picked up without restart.
+      type: string
+      label: current
+      persistent: false
+      initialValue: ""
+
     - name: skill_json_arg
       description: |
-        Single JSON string argument built from params via ${field} interpolation.
-        Passed as sys.argv[1] to the skill script.
+        Single JSON string argument passed as sys.argv[1] to the skill script.
+        Built dynamically each tick from skill_json_arg_template + current spec.params.
       type: string
       label: current
       persistent: false
@@ -60,6 +87,7 @@ wantType:
     - name: room
       description: Room name (copied from param)
       type: string
+      subType: smartgolf_room
       label: current
       persistent: false
       initialValue: ""
@@ -67,6 +95,7 @@ wantType:
     - name: date
       description: Booking date (copied from param)
       type: string
+      subType: date
       label: current
       persistent: false
       initialValue: ""
@@ -74,6 +103,7 @@ wantType:
     - name: time
       description: Booking time (copied from param)
       type: string
+      subType: time
       label: current
       persistent: false
       initialValue: ""
@@ -86,36 +116,49 @@ wantType:
       initialValue: ""
 
     - name: summary
-      description: Summary of booking confirmation
+      description: >
+        Human-readable summary of the SmartGolf booking confirmation screen,
+        including room name, date/time, and payment method. Non-empty means
+        the booking flow reached the confirmation page successfully.
       type: string
       label: current
       persistent: true
       initialValue: ""
+      exposable: true
 
     - name: reservation_datetime
-      description: Reservation date/time as shown on confirmation
+      description: >
+        Reservation date and time as displayed on the SmartGolf confirmation screen
+        (e.g. "Sun, Jun 7, 2026 10:00 AM-"). Confirms the slot that was booked.
       type: string
       label: current
       persistent: true
       initialValue: ""
+      exposable: true
       fetchFrom: mrs_raw_output
       onFetchData: "confirmation.reservation_datetime"
 
     - name: service
-      description: Service name as shown on confirmation
+      description: >
+        SmartGolf room/service name as displayed on the confirmation screen
+        (e.g. "北新宿店/右打席予約(Room01) （60 min）").
       type: string
       label: current
       persistent: true
       initialValue: ""
+      exposable: true
       fetchFrom: mrs_raw_output
       onFetchData: "confirmation.service"
 
     - name: payment
-      description: Payment method as shown on confirmation
+      description: >
+        Payment method displayed on the SmartGolf confirmation screen
+        (e.g. "Monthly fee:SMART GOLF シルバー").
       type: string
       label: current
       persistent: true
       initialValue: ""
+      exposable: true
       fetchFrom: mrs_raw_output
       onFetchData: "confirmation.payment"
 
@@ -132,10 +175,11 @@ wantType:
   onInitialize:
     current:
       skill_path: "~/.mywant/custom-types/mywant-smartgolf-book-plugin/main.py"
-      skill_json_arg: '{"room":"${room}","date":"${date}","time":{"time":"${time}"}}'
+      skill_required_params: "selected_slot"
+      skill_json_arg_template: '{"room":"%{room}","date":"%{date}","time":"%{time}"}'
 
   requires:
-    - do_mrs_agent
+    - monitor_mrs_agent
 
   examples:
     - name: Book SmartGolf Room
