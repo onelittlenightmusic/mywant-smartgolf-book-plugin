@@ -1,14 +1,8 @@
 import json
+import os
 import sys
-import time
+import urllib.request
 from datetime import datetime, timezone, timedelta
-try:
-    from playwright.sync_api import sync_playwright
-except ImportError:
-    print(json.dumps({
-        "error": "playwright module not found. Install with: pip3 install playwright && playwright install chromium"
-    }, ensure_ascii=False))
-    sys.exit(1)
 
 JST = timezone(timedelta(hours=9))
 
@@ -17,6 +11,43 @@ LOCATION_URLS = {
     "中野新橋店": "https://smartgolf.stores.jp/reserve/smartgolf_nakanoshimbashi/1459178/book/course_type",
     "新中野店": "https://smartgolf.stores.jp/reserve/smartgolf_shinnakano/4619269/book/course_type",
 }
+
+MYWANT_API = os.environ.get("MYWANT_URL", "http://localhost:8080")
+
+
+def browser_run(url, steps, keep_open=False, background=True, timeout_ms=90000):
+    """Runs steps (a @puppeteer/replay UserFlow's Step[] JSON, plus our
+    read/readAll/loop/etc. customStep extensions) against url via the mywant
+    browser extension — the CDP-free replacement for
+    playwright.chromium.connect_over_cdp. See engine/server/handlers_web_wants.go's
+    browserRun and mcp/playwright-app/webext-src/browser-run-interpreter.ts.
+    background=True (default) opens the tab without stealing focus."""
+    payload = json.dumps({
+        "url": url, "steps": steps, "keep_open": keep_open,
+        "background": background, "timeout_ms": timeout_ms,
+    }).encode()
+    req = urllib.request.Request(
+        f"{MYWANT_API}/api/v1/web-wants/browser-run",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=(timeout_ms / 1000) + 10) as r:
+        data = json.loads(r.read())
+    if data.get("error"):
+        raise RuntimeError(data["error"])
+    return data.get("result", {})
+
+
+def xpath_literal(s: str) -> str:
+    """XPath 1.0 has no string-literal escape, so a value containing both
+    quote types needs the concat() trick."""
+    if "'" not in s:
+        return f"'{s}'"
+    if '"' not in s:
+        return f'"{s}"'
+    parts = s.split("'")
+    return "concat(" + ", \"'\", ".join(f"'{p}'" for p in parts) + ")"
 
 
 def report_progress(percentage, message=""):
@@ -42,72 +73,106 @@ def time_to_utc_value(date_str, time_str):
     return dt_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
-def find_section_next_button(page):
-    """Find the section-progression Next button (not 'Next week' or 'Previous week')."""
-    return page.evaluate("""() => {
-        const btns = document.querySelectorAll('button');
-        for (const btn of btns) {
-            if (btn.innerText.trim() === 'Next' && !btn.disabled) return true;
-        }
-        return false;
-    }""")
+# room_li/next-week/next-section buttons are matched by their own text
+# content, not a stable class name (the site has none) — CSS can't express
+# that, so these use xpath: (see browser-run-interpreter.ts's resolveSingle).
+# The site's UI language depends on login/account state (confirmed while
+# debugging: logged out → Japanese, logged in → English) rather than being
+# fixed, so both label sets are matched with xpath's `or`. 「予約確認」/
+# "Next" only navigates to the confirmation screen — it does NOT finalize
+# the reservation (the actual "Confirm Reservation" button on that screen
+# is never clicked by this flow).
+#
+# room_xpath targets the <input> INSIDE the matching <li>, not the <li>
+# itself: a programmatic .click() dispatches an event whose target is
+# exactly the clicked element, which then only bubbles UP through
+# ancestors — it never reaches a handler on a DESCENDANT. Playwright's
+# click() instead simulates a real mouse click at the element's on-screen
+# center, which in practice lands on whatever's actually rendered there
+# (here, the input), so the original CDP-based script's `li.click()`
+# worked by accident of coordinates, not because the <li> itself has a
+# handler. Clicking the input directly (same pattern already proven by
+# smartgolf-list's room-radio clicks) reaches the real handler regardless.
+def build_booking_steps(room_name: str, utc_val: str) -> list:
+    room_xpath = f"xpath://li[.//label[contains(., {xpath_literal(room_name)})]]//input"
+    next_week_xpath = "xpath://button[contains(., 'Next week') or contains(., '次の一週間')]"
+    next_section_xpath = (
+        "xpath://button[(normalize-space(.)='Next' or normalize-space(.)='予約確認') and not(@disabled)]"
+    )
+    slot_selector = f'input[value="{utc_val}"]'
 
+    # 予約確定直前の確認画面まで進めたら停止する（元実装同様、確定ボタンは
+    # 押さない — ユーザーが目視確認してから手動で確定する想定）。
+    confirm_steps = [
+        {"type": "customStep", "name": "sleep", "parameters": {"ms": 1000}},
+        {"type": "customStep", "name": "if", "parameters": {
+            "condition": {"selector_exists": next_section_xpath},
+            "then": [
+                {"type": "click", "selectors": [[next_section_xpath]]},
+                {"type": "customStep", "name": "sleep", "parameters": {"ms": 3000}},
+                {"type": "customStep", "name": "read", "parameters": {
+                    "selector": "body", "extract": "text", "as": "confirmation_text", "timeout_ms": 5000,
+                }},
+                {"type": "customStep", "name": "setResult", "parameters": {"key": "status", "value": "ready_to_confirm"}},
+            ],
+            "else": [
+                {"type": "customStep", "name": "setResult", "parameters": {"key": "status", "value": "next_button_disabled"}},
+            ],
+        }},
+    ]
 
-def click_section_next_button(page):
-    """Click the section-progression Next button."""
-    page.evaluate("""() => {
-        const btns = document.querySelectorAll('button');
-        for (const btn of btns) {
-            if (btn.innerText.trim() === 'Next' && !btn.disabled) {
-                btn.click();
-                return;
-            }
-        }
-    }""")
+    # 今週になければ最大8回「Next week」を押して探す（元実装のfor week in range(9)と同じ回数）。
+    time_slot_steps = [
+        {"type": "customStep", "name": "loop", "parameters": {
+            "max_iterations": 8,
+            "until": {"selector_exists": slot_selector},
+            "body": [
+                {"type": "click", "selectors": [[next_week_xpath]]},
+                {"type": "customStep", "name": "sleep", "parameters": {"ms": 1500}},
+            ],
+        }},
+        {"type": "customStep", "name": "if", "parameters": {
+            "condition": {"selector_exists": slot_selector},
+            "then": [
+                {"type": "customStep", "name": "if", "parameters": {
+                    # disabled属性の「値」ではなく「有無」で判定する（値は
+                    # フレームワークにより ""/"true"/"disabled" など不定）。
+                    "condition": {"selector": slot_selector, "extract": "attr", "attr": "disabled", "exists": True},
+                    "then": [
+                        {"type": "customStep", "name": "setResult", "parameters": {"key": "status", "value": "time_slot_disabled"}},
+                    ],
+                    "else": [
+                        # XState駆動のUIで、ネイティブchange/inputイベントではなく
+                        # Reactのcontrolled onChangeハンドラを直接叩く必要がある。
+                        {"type": "customStep", "name": "reactChange", "parameters": {"selector": slot_selector}},
+                        *confirm_steps,
+                    ],
+                }},
+            ],
+            "else": [
+                {"type": "customStep", "name": "setResult", "parameters": {"key": "status", "value": "time_slot_not_found"}},
+            ],
+        }},
+    ]
 
-
-def select_room(page, room_name):
-    """Select room by clicking the LI containing the room name label.
-    The click triggers the XState INPUT_COURSE_CANONICAL_ID event internally.
-    """
-    # Click the LI that contains a label with the room name
-    xpath = f"//li[.//label[contains(., '{room_name}')]]"
-    room_li = page.query_selector(f"xpath={xpath}")
-    if not room_li:
-        return False
-    room_li.click()
-    return True
-
-
-def select_time_slot(page, utc_val):
-    """Find the time slot radio input and trigger its React onChange handler.
-    Navigates forward through weeks to find the target date/time.
-    Returns True if found and selected.
-    """
-    # Try current week first, then advance up to 8 weeks
-    for week in range(9):
-        target_inp = page.query_selector(f'input[value="{utc_val}"]')
-        if target_inp:
-            if target_inp.is_disabled():
-                return False  # Time slot exists but unavailable
-            # Trigger the XState INPUT_DATE_TIME event via React onChange
-            page.evaluate("""inp => {
-                const pk = Object.keys(inp).find(k => k.startsWith('__reactProps'));
-                if (pk && inp[pk].onChange) {
-                    inp[pk].onChange({ target: inp, currentTarget: inp });
-                }
-            }""", target_inp)
-            return True
-
-        if week < 8:
-            # Advance to next week
-            next_week_btn = page.query_selector('button:has-text("Next week")')
-            if not next_week_btn:
-                break
-            next_week_btn.evaluate("b => b.click()")
-            time.sleep(1.5)
-
-    return False
+    return [
+        {"type": "customStep", "name": "sleep", "parameters": {"ms": 3000}},
+        {"type": "customStep", "name": "if", "parameters": {
+            "condition": {"selector_exists": room_xpath},
+            "then": [
+                # クリックはXState INPUT_COURSE_CANONICAL_IDイベントを内部で発火させる
+                {"type": "click", "selectors": [[room_xpath]]},
+                # カレンダーAJAXの読み込みを待つ（固定sleepだけだと、time_slot_steps
+                # のuntilチェックが未読み込み状態で走り、実際は今週に空きがあるのに
+                # 誤って「Next week」を押して通り過ぎてしまう）。
+                {"type": "waitForElement", "selectors": [['input[name="dateTimeSelection"]']], "timeout": 15000},
+                *time_slot_steps,
+            ],
+            "else": [
+                {"type": "customStep", "name": "setResult", "parameters": {"key": "status", "value": "room_not_found"}},
+            ],
+        }},
+    ]
 
 
 def parse_confirmation(body_text):
@@ -160,67 +225,45 @@ def main():
 
     utc_val = time_to_utc_value(date_str, time_str)
 
+    ERROR_MESSAGES = {
+        "room_not_found": f"Room not found on page: {room_name}",
+        "time_slot_not_found": f"Time slot not found or unavailable: {date_str} {time_str} (UTC: {utc_val})",
+        "time_slot_disabled": f"Time slot not found or unavailable: {date_str} {time_str} (UTC: {utc_val})",
+        "next_button_disabled": "Next button is still disabled after room and time slot selection",
+    }
+
     try:
-        with sync_playwright() as p:
-            report_progress(5, "Connecting to browser")
-            browser = p.chromium.connect_over_cdp("http://localhost:9222")
-            context = browser.contexts[0]
-            page = context.new_page()
-            page.set_viewport_size({"width": 390, "height": 844})
-
-            # 予約ページへ遷移
-            report_progress(15, f"Navigating to booking page: {room_name}")
-            page.goto(url, wait_until="domcontentloaded")
-            time.sleep(3)
-
-            # 部屋を選択 (XState INPUT_COURSE_CANONICAL_ID event)
-            report_progress(30, f"Selecting room: {room_name}")
-            if not select_room(page, room_name):
-                error_out(f"Room not found on page: {room_name}")
-
-            # 予約情報をロードするまで待機
-            time.sleep(2)
-
-            # 時間スロットを選択 (XState INPUT_DATE_TIME event via React onChange)
-            report_progress(50, f"Selecting time slot: {date_str} {time_str}")
-            if not select_time_slot(page, utc_val):
-                error_out(f"Time slot not found or unavailable: {date_str} {time_str} (UTC: {utc_val})")
-
-            # Next ボタンが有効になるまで待機
-            time.sleep(1)
-
-            # Next ボタンが有効か確認
-            if not find_section_next_button(page):
-                error_out("Next button is still disabled after room and time slot selection")
-
-            # Next ボタンをクリック (確認画面へ)
-            report_progress(75, "Navigating to confirmation screen")
-            click_section_next_button(page)
-            time.sleep(3)
-
-            # 確認画面のテキストを取得（予約ボタンは押さない）
-            report_progress(90, "Reading confirmation screen")
-            body_text = page.inner_text('body')
-            confirmation = parse_confirmation(body_text)
-
-            # page.close() は呼ばない — 確認画面をブラウザに残す
-
-            reservation_dt = confirmation.get("reservation_datetime", f"{date_str} {time_str}")
-            result = {
-                "status": "ready_to_confirm",
-                "room": room_name,
-                "date": date_str,
-                "time": time_str,
-                "confirmation": confirmation,
-                "summary": f"{room_name} {reservation_dt} - ready to confirm",
-            }
-            report_progress(100, "Done")
-            print(json.dumps(result, ensure_ascii=False), flush=True)
-
-    except SystemExit:
-        raise
+        report_progress(15, f"Navigating to booking page: {room_name}")
+        # keep_open=True: 確認画面をブラウザに残す（元実装同様、確定ボタンは押さない）。
+        # background=False: ユーザーが目視確認できるよう前面に表示する。
+        result = browser_run(
+            url, build_booking_steps(room_name, utc_val),
+            keep_open=True, background=False, timeout_ms=150000,
+        )
     except Exception as e:
         error_out(str(e))
+        return
+
+    status = result.get("status", "")
+    if status in ERROR_MESSAGES:
+        error_out(ERROR_MESSAGES[status])
+    if status != "ready_to_confirm":
+        error_out(f"Unexpected status from browser_run: {status or '(none — flow did not complete)'}")
+
+    report_progress(90, "Reading confirmation screen")
+    confirmation = parse_confirmation(result.get("confirmation_text") or "")
+
+    reservation_dt = confirmation.get("reservation_datetime", f"{date_str} {time_str}")
+    output = {
+        "status": "ready_to_confirm",
+        "room": room_name,
+        "date": date_str,
+        "time": time_str,
+        "confirmation": confirmation,
+        "summary": f"{room_name} {reservation_dt} - ready to confirm",
+    }
+    report_progress(100, "Done")
+    print(json.dumps(output, ensure_ascii=False), flush=True)
 
 
 if __name__ == "__main__":
